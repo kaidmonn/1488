@@ -1,0 +1,15 @@
+name: ODMGear
+version: 1.0
+main: me.titan.odm.ODMGearPlugin
+api-version: '1.21'
+author: AI_Studio
+description: Плагин на УПМ из Атаки Титанов
+commands:
+  odm:
+    description: Получить снаряжение УПМ
+    usage: /odm
+    permission: odm.admin
+permissions:
+  odm.admin:
+    description: Разрешает выдавать себе УПМ
+    default: op

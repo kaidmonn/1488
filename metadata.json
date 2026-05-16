@@ -1,0 +1,6 @@
+{
+  "name": "Minecraft ODM Gear Plugin",
+  "description": "Профессиональный плагин для реализации механики УПМ из Атаки Титанов для Paper 1.21.4 (Java 21).",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
