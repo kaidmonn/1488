@@ -72,7 +72,7 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
 
     // --- СОЗДАНИЕ ПРЕДМЕТОВ ---
     private ItemStack createGear() {
-        ItemStack item = new ItemStack(Material.NETHERITE_CHESTPLATE);
+        ItemStack item = new ItemStack(Material.NETHERITE_HELMET);
         ItemMeta meta = item.getItemMeta();
         meta.displayName(Component.text("Основа УПМ 2.0", NamedTextColor.GOLD).decoration(TextDecoration.ITALIC, false));
         // Для ресурспака: 910 - без меча, 911 - с мечом
@@ -118,9 +118,9 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
     }
 
     private void updateGearModel(Player player) {
-        ItemStack chest = player.getInventory().getChestplate();
-        if (chest != null && isGear(chest)) {
-            ItemMeta meta = chest.getItemMeta();
+        ItemStack helmet = player.getInventory().getHelmet();
+        if (helmet != null && isGear(helmet)) {
+            ItemMeta meta = helmet.getItemMeta();
             ItemStack mainHand = player.getInventory().getItemInMainHand();
             
             int targetCmd = isBlade(mainHand) ? 911 : 910;
@@ -128,7 +128,7 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
             if (meta.hasCustomModelData() && meta.getCustomModelData() == targetCmd) return;
             
             meta.setCustomModelData(targetCmd);
-            chest.setItemMeta(meta);
+            helmet.setItemMeta(meta);
         }
     }
 
@@ -169,8 +169,8 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
     }
 
     private boolean isWearingGear(Player player) {
-        ItemStack chest = player.getInventory().getChestplate();
-        return chest != null && chest.hasItemMeta() && chest.getItemMeta().getPersistentDataContainer().has(gearKey, PersistentDataType.BYTE);
+        ItemStack helmet = player.getInventory().getHelmet();
+        return helmet != null && helmet.hasItemMeta() && helmet.getItemMeta().getPersistentDataContainer().has(gearKey, PersistentDataType.BYTE);
     }
 
     // --- ЗАЩИТА ПРЕДМЕТОВ И ИГРОКА ---
