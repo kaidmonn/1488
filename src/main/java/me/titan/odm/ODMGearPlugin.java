@@ -42,20 +42,45 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
 
     private final NamespacedKey gearKey = new NamespacedKey(this, "odm_gear");
     private final NamespacedKey bladeKey = new NamespacedKey(this, "odm_blade");
+    private final NamespacedKey fluidKey = new NamespacedKey(this, "titan_fluid");
     private final Map<UUID, HookProcess> activeHooks = new ConcurrentHashMap<>();
     private final Set<UUID> fallImmune = Collections.newSetFromMap(new ConcurrentHashMap<>());
+    private final Map<UUID, Long> titanAbilitiesCooldown = new HashMap<>();
+    private final Set<UUID> titans = new HashSet<>();
 
     @Override
     public void onEnable() {
         getServer().getPluginManager().registerEvents(this, this);
         getCommand("odm").setExecutor(this);
-        getLogger().info("УПМ Плагин активирован!");
+        getCommand("odm").setTabCompleter(this);
+
+        // Задача для бега по стенам Титанов
+        Bukkit.getScheduler().runTaskTimer(this, () -> {
+            for (UUID uuid : titans) {
+                Player p = Bukkit.getPlayer(uuid);
+                if (p == null || !p.isOnline()) continue;
+                
+                // Проверка бега в стену
+                Block front = p.getEyeLocation().add(p.getLocation().getDirection().multiply(0.8)).getBlock();
+                if (front.getType().isSolid()) {
+                    Vector vel = p.getVelocity();
+                    vel.setY(0.4); // Подъем по стене
+                    p.setVelocity(vel);
+                }
+            }
+        }, 0, 1);
+
+        getLogger().info("УПМ и Система Титанов активирована!");
     }
 
     @Override
     public void onDisable() {
         activeHooks.values().forEach(HookProcess::cancel);
         activeHooks.clear();
+        for (UUID uuid : titans) {
+            Player p = Bukkit.getPlayer(uuid);
+            if (p != null) revertTitan(p);
+        }
     }
 
     // --- КОМАНДА ВЫДАЧИ ---
@@ -63,6 +88,12 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
     public boolean onCommand(@NotNull CommandSender sender, @NotNull Command command, @NotNull String label, @NotNull String[] args) {
         if (!(sender instanceof Player player)) return true;
         if (!player.hasPermission("odm.admin")) return true;
+
+        if (args.length > 0 && args[0].equalsIgnoreCase("serum")) {
+            player.getInventory().addItem(createSerum());
+            player.sendMessage(Component.text("Вы получили сыворотку Атакующего Титана!", NamedTextColor.RED));
+            return true;
+        }
 
         player.getInventory().addItem(createGear());
         player.getInventory().addItem(createBlade());
@@ -72,15 +103,23 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
 
     // --- СОЗДАНИЕ ПРЕДМЕТОВ ---
     private ItemStack createGear() {
-        ItemStack item = new ItemStack(Material.NETHERITE_HELMET);
+        ItemStack item = new ItemStack(Material.NETHERITE_CHESTPLATE);
         ItemMeta meta = item.getItemMeta();
         meta.displayName(Component.text("Основа УПМ 2.0", NamedTextColor.GOLD).decoration(TextDecoration.ITALIC, false));
-        // Для ресурспака: 910 - без меча, 911 - с мечом
         meta.setCustomModelData(910);
         meta.setUnbreakable(true);
-        // Защита от деспавна и огня через PDC и свойства
         meta.getPersistentDataContainer().set(gearKey, PersistentDataType.BYTE, (byte) 1);
         meta.setFireResistant(true);
+        item.setItemMeta(meta);
+        return item;
+    }
+
+    private ItemStack createSerum() {
+        ItemStack item = new ItemStack(Material.COAL);
+        ItemMeta meta = item.getItemMeta();
+        meta.displayName(Component.text("Спинномозговая жидкость атакующего титана", NamedTextColor.DARK_RED).decoration(TextDecoration.BOLD, true));
+        meta.setCustomModelData(913);
+        meta.getPersistentDataContainer().set(fluidKey, PersistentDataType.BYTE, (byte) 1);
         item.setItemMeta(meta);
         return item;
     }
@@ -118,9 +157,9 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
     }
 
     private void updateGearModel(Player player) {
-        ItemStack helmet = player.getInventory().getHelmet();
-        if (helmet != null && isGear(helmet)) {
-            ItemMeta meta = helmet.getItemMeta();
+        ItemStack chest = player.getInventory().getChestplate();
+        if (chest != null && isGear(chest)) {
+            ItemMeta meta = chest.getItemMeta();
             ItemStack mainHand = player.getInventory().getItemInMainHand();
             
             int targetCmd = isBlade(mainHand) ? 911 : 910;
@@ -128,21 +167,44 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
             if (meta.hasCustomModelData() && meta.getCustomModelData() == targetCmd) return;
             
             meta.setCustomModelData(targetCmd);
-            helmet.setItemMeta(meta);
+            chest.setItemMeta(meta);
         }
     }
 
     // --- ЛОГИКА АКТИВАЦИИ ---
     @EventHandler
     public void onInteract(PlayerInteractEvent event) {
-        if (event.getHand() == EquipmentSlot.OFF_HAND) return; // ПРЕДОТВРАЩАЕМ ДВОЙНОЙ ЗАПУСК
-        if (event.getAction() != Action.RIGHT_CLICK_AIR && event.getAction() != Action.RIGHT_CLICK_BLOCK) return;
+        if (event.getHand() == EquipmentSlot.OFF_HAND) return;
         Player player = event.getPlayer();
+        ItemStack item = player.getInventory().getItemInMainHand();
+        UUID uuid = player.getUniqueId();
 
-        if (!isWearingGear(player) || !isBlade(player.getInventory().getItemInMainHand())) return;
+        // Использование сыворотки
+        if (isFluid(item) && (event.getAction() == Action.RIGHT_CLICK_AIR || event.getAction() == Action.RIGHT_CLICK_BLOCK)) {
+            event.setCancelled(true);
+            if (titans.contains(uuid)) {
+                revertTitan(player);
+            } else {
+                transformTitan(player);
+            }
+            return;
+        }
+
+        // Способность Титана (захват)
+        if (titans.contains(uuid) && (event.getAction() == Action.RIGHT_CLICK_AIR || event.getAction() == Action.RIGHT_CLICK_BLOCK)) {
+            event.setCancelled(true);
+            useTitanAbility(player);
+            return;
+        }
+
+        if (event.getAction() != Action.RIGHT_CLICK_AIR && event.getAction() != Action.RIGHT_CLICK_BLOCK) return;
+        
+        // Запрет УПМ для титанов
+        if (titans.contains(uuid)) return;
+
+        if (!isWearingGear(player) || !isBlade(item)) return;
 
         event.setCancelled(true);
-        UUID uuid = player.getUniqueId();
 
         // Отмена текущего полета
         if (activeHooks.containsKey(uuid)) {
@@ -169,8 +231,96 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
     }
 
     private boolean isWearingGear(Player player) {
-        ItemStack helmet = player.getInventory().getHelmet();
-        return helmet != null && helmet.hasItemMeta() && helmet.getItemMeta().getPersistentDataContainer().has(gearKey, PersistentDataType.BYTE);
+        ItemStack chest = player.getInventory().getChestplate();
+        return chest != null && chest.hasItemMeta() && chest.getItemMeta().getPersistentDataContainer().has(gearKey, PersistentDataType.BYTE);
+    }
+
+    private void transformTitan(Player player) {
+        UUID uuid = player.getUniqueId();
+        titans.add(uuid);
+
+        // Эффекты превращения
+        player.getWorld().strikeLightningEffect(player.getLocation());
+        player.getWorld().spawnParticle(Particle.EXPLOSION_EMITTER, player.getLocation(), 1);
+        player.getWorld().playSound(player.getLocation(), Sound.ENTITY_GENERIC_EXPLODE, 1.0f, 1.0f);
+
+        // Атрибуты
+        double health = player.getAttribute(Attribute.MAX_HEALTH).getBaseValue();
+        double damage = player.getAttribute(Attribute.ATTACK_DAMAGE).getBaseValue();
+        double speed = player.getAttribute(Attribute.MOVEMENT_SPEED).getBaseValue();
+
+        player.getAttribute(Attribute.SCALE).setBaseValue(7.0);
+        player.getAttribute(Attribute.MAX_HEALTH).setBaseValue(health * 2);
+        player.setHealth(player.getAttribute(Attribute.MAX_HEALTH).getValue());
+        player.getAttribute(Attribute.ATTACK_DAMAGE).setBaseValue(damage * 2);
+        player.getAttribute(Attribute.MOVEMENT_SPEED).setBaseValue(speed * 2);
+
+        // Имя
+        player.customName(Component.text("Атакующий Титан", NamedTextColor.GREEN).decoration(TextDecoration.BOLD, true));
+        player.setCustomNameVisible(true);
+
+        player.sendMessage(Component.text("Вы превратились в Атакующего Титана!", NamedTextColor.GREEN));
+        player.setAllowFlight(true); // Для двойного прыжка
+    }
+
+    private void revertTitan(Player player) {
+        UUID uuid = player.getUniqueId();
+        titans.remove(uuid);
+
+        player.getAttribute(Attribute.SCALE).setBaseValue(1.0);
+        player.getAttribute(Attribute.MAX_HEALTH).setBaseValue(20.0);
+        player.getAttribute(Attribute.ATTACK_DAMAGE).setBaseValue(1.0);
+        player.getAttribute(Attribute.MOVEMENT_SPEED).setBaseValue(0.1);
+
+        player.customName(null);
+        player.setCustomNameVisible(false);
+        player.setAllowFlight(false);
+        player.setFlying(false);
+
+        player.sendMessage(Component.text("Вы вернулись в человеческую форму.", NamedTextColor.YELLOW));
+    }
+
+    private void useTitanAbility(Player player) {
+        UUID uuid = player.getUniqueId();
+        long now = System.currentTimeMillis();
+        if (titanAbilitiesCooldown.containsKey(uuid) && titanAbilitiesCooldown.get(uuid) > now) {
+            long remaining = (titanAbilitiesCooldown.get(uuid) - now) / 1000;
+            player.sendMessage(Component.text("Способность будет доступна через " + remaining + " сек.", NamedTextColor.RED));
+            return;
+        }
+
+        player.sendMessage(Component.text("ИСПОЛЬЗОВАН ЗАХВАТ!", NamedTextColor.RED, TextDecoration.BOLD));
+        player.getWorld().playSound(player.getLocation(), Sound.ENTITY_WARDEN_ROAR, 1.0f, 0.5f);
+
+        for (Entity e : player.getNearbyEntities(10, 10, 10)) {
+            if (e instanceof LivingEntity le && !e.equals(player)) {
+                // Притягивание
+                Vector toTitan = player.getLocation().toVector().subtract(le.getLocation().toVector()).normalize().multiply(1.5);
+                le.setVelocity(toTitan);
+
+                // Урон (3 сердца = 6 хп)
+                le.damage(6.0, player);
+
+                // Обездвиживание
+                le.addPotionEffect(new org.bukkit.potion.PotionEffect(org.bukkit.potion.PotionEffectType.SLOWNESS, 60, 10, false, false));
+                le.addPotionEffect(new org.bukkit.potion.PotionEffect(org.bukkit.potion.PotionEffectType.JUMP_BOOST, 60, 200, false, false));
+            }
+        }
+
+        titanAbilitiesCooldown.put(uuid, now + 25000);
+    }
+
+    @EventHandler
+    public void onTitanJump(org.bukkit.event.player.PlayerToggleFlightEvent event) {
+        Player p = event.getPlayer();
+        if (titans.contains(p.getUniqueId())) {
+            event.setCancelled(true);
+            p.setFlying(false);
+            // Прыжок на 7 блоков вверх
+            Vector v = p.getLocation().getDirection().multiply(0.5).setY(1.3);
+            p.setVelocity(v);
+            p.getWorld().playSound(p.getLocation(), Sound.ENTITY_ZOMBIE_ATTACK_IRON_DOOR, 1.0f, 0.5f);
+        }
     }
 
     // --- ЗАЩИТА ПРЕДМЕТОВ И ИГРОКА ---
@@ -205,6 +355,11 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
     private boolean isGear(ItemStack item) {
         if (item == null || !item.hasItemMeta()) return false;
         return item.getItemMeta().getPersistentDataContainer().has(gearKey, PersistentDataType.BYTE);
+    }
+
+    private boolean isFluid(ItemStack item) {
+        if (item == null || !item.hasItemMeta()) return false;
+        return item.getItemMeta().getPersistentDataContainer().has(fluidKey, PersistentDataType.BYTE);
     }
 
     // --- КЛАСС ПРОЦЕССА КРЮКА ---
