@@ -43,9 +43,11 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
     private final NamespacedKey gearKey = new NamespacedKey(this, "odm_gear");
     private final NamespacedKey bladeKey = new NamespacedKey(this, "odm_blade");
     private final NamespacedKey fluidKey = new NamespacedKey(this, "titan_fluid");
+    private final NamespacedKey waterSwordKey = new NamespacedKey(this, "water_sword");
     private final Map<UUID, HookProcess> activeHooks = new ConcurrentHashMap<>();
     private final Set<UUID> fallImmune = Collections.newSetFromMap(new ConcurrentHashMap<>());
     private final Map<UUID, Long> titanAbilitiesCooldown = new HashMap<>();
+    private final Map<UUID, Long> waterWaveCooldown = new HashMap<>();
     private final Set<UUID> titans = new HashSet<>();
 
     @Override
@@ -89,16 +91,32 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
         if (!(sender instanceof Player player)) return true;
         if (!player.hasPermission("odm.admin")) return true;
 
-        if (args.length > 0 && args[0].equalsIgnoreCase("serum")) {
-            player.getInventory().addItem(createSerum());
-            player.sendMessage(Component.text("Вы получили сыворотку Атакующего Титана!", NamedTextColor.RED));
-            return true;
+        if (args.length > 0) {
+            if (args[0].equalsIgnoreCase("serum")) {
+                player.getInventory().addItem(createSerum());
+                player.sendMessage(Component.text("Вы получили сыворотку Атакующего Титана!", NamedTextColor.RED));
+                return true;
+            } else if (args[0].equalsIgnoreCase("water_sword")) {
+                player.getInventory().addItem(createWaterSword());
+                player.sendMessage(Component.text("Вы получили Водяной Меч!", NamedTextColor.BLUE));
+                return true;
+            }
         }
 
         player.getInventory().addItem(createGear());
         player.getInventory().addItem(createBlade());
         player.sendMessage(Component.text("Вы получили снаряжение УПМ!", NamedTextColor.GREEN));
         return true;
+    }
+
+    @Override
+    public List<String> onTabComplete(@NotNull CommandSender sender, @NotNull Command command, @NotNull String alias, @NotNull String[] args) {
+        if (args.length == 1) {
+            List<String> list = new ArrayList<>(Arrays.asList("serum", "water_sword"));
+            list.removeIf(s -> !s.toLowerCase().startsWith(args[0].toLowerCase()));
+            return list;
+        }
+        return Collections.emptyList();
     }
 
     // --- СОЗДАНИЕ ПРЕДМЕТОВ ---
@@ -120,6 +138,23 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
         meta.displayName(Component.text("Спинномозговая жидкость атакующего титана", NamedTextColor.DARK_RED).decoration(TextDecoration.BOLD, true));
         meta.setCustomModelData(913);
         meta.getPersistentDataContainer().set(fluidKey, PersistentDataType.BYTE, (byte) 1);
+        item.setItemMeta(meta);
+        return item;
+    }
+
+    private ItemStack createWaterSword() {
+        ItemStack item = new ItemStack(Material.DIAMOND_SWORD);
+        ItemMeta meta = item.getItemMeta();
+        meta.displayName(Component.text("Водяной Меч", NamedTextColor.BLUE).decoration(TextDecoration.BOLD, true).decoration(TextDecoration.ITALIC, false));
+        // Для ресурспака: 500 - модель водяного меча
+        meta.setCustomModelData(500);
+        meta.setUnbreakable(true);
+        meta.getPersistentDataContainer().set(waterSwordKey, PersistentDataType.BYTE, (byte) 1);
+
+        // Урон 14 (базовый урон меча заменяется этим модификатором на 14.0)
+        AttributeModifier modifier = new AttributeModifier(new NamespacedKey(this, "water_sword_damage"), 14.0, AttributeModifier.Operation.ADD_NUMBER, EquipmentSlotGroup.MAINHAND);
+        meta.addAttributeModifier(Attribute.ATTACK_DAMAGE, modifier);
+
         item.setItemMeta(meta);
         return item;
     }
@@ -187,6 +222,13 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
             } else {
                 transformTitan(player);
             }
+            return;
+        }
+
+        // Использование Водяного Меча
+        if (isWaterSword(item) && (event.getAction() == Action.RIGHT_CLICK_AIR || event.getAction() == Action.RIGHT_CLICK_BLOCK)) {
+            event.setCancelled(true);
+            useWaterSwordAbility(player);
             return;
         }
 
@@ -338,7 +380,7 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
         if (event.getEntityType() == EntityType.ITEM) {
             Item itemEntity = (Item) event.getEntity();
             ItemStack stack = itemEntity.getItemStack();
-            if (isBlade(stack) || isGear(stack)) {
+            if (isBlade(stack) || isGear(stack) || isWaterSword(stack)) {
                 event.setCancelled(true);
             }
         }
@@ -347,8 +389,39 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
     @EventHandler
     public void onItemDespawn(ItemDespawnEvent event) {
         ItemStack stack = event.getEntity().getItemStack();
-        if (isBlade(stack) || isGear(stack)) {
+        if (isBlade(stack) || isGear(stack) || isWaterSword(stack)) {
             event.setCancelled(true);
+        }
+    }
+
+    @EventHandler
+    public void onEntityDamageByEntity(EntityDamageByEntityEvent event) {
+        if (!(event.getDamager() instanceof Player damager)) return;
+        if (!(event.getEntity() instanceof LivingEntity victim)) return;
+
+        ItemStack inHand = damager.getInventory().getItemInMainHand();
+        if (isWaterSword(inHand)) {
+            // Шанс 5% подкинуть в воздух на 4 блока
+            if (Math.random() < 0.05) {
+                // Скорость Y ≈ 0.95 подкидывает сущность примерно на 4 блока вверх
+                victim.setVelocity(new Vector(0, 0.95, 0));
+
+                World world = victim.getWorld();
+                Location loc = victim.getLocation();
+                world.playSound(loc, Sound.ENTITY_PLAYER_SPLASH, 1.5f, 0.8f);
+                world.playSound(loc, Sound.ITEM_BUCKET_EMPTY, 1.2f, 1.2f);
+
+                // Эффекты водяного сплеша / гейзера
+                for (int i = 0; i < 25; i++) {
+                    double offsetX = (Math.random() - 0.5) * 0.8;
+                    double offsetY = Math.random() * 2.0;
+                    double offsetZ = (Math.random() - 0.5) * 0.8;
+                    world.spawnParticle(Particle.SPLASH, loc.clone().add(offsetX, offsetY, offsetZ), 1, 0, 0, 0, 0.1);
+                    world.spawnParticle(Particle.WATER_WAKE, loc.clone().add(offsetX, offsetY, offsetZ), 1, 0, 0, 0, 0.05);
+                }
+
+                damager.sendMessage(Component.text("Водный гейзер подкинул противника!", NamedTextColor.AQUA, TextDecoration.BOLD));
+            }
         }
     }
 
@@ -360,6 +433,98 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
     private boolean isFluid(ItemStack item) {
         if (item == null || !item.hasItemMeta()) return false;
         return item.getItemMeta().getPersistentDataContainer().has(fluidKey, PersistentDataType.BYTE);
+    }
+
+    private boolean isWaterSword(ItemStack item) {
+        if (item == null || !item.hasItemMeta()) return false;
+        return item.getItemMeta().getPersistentDataContainer().has(waterSwordKey, PersistentDataType.BYTE);
+    }
+
+    private void useWaterSwordAbility(Player player) {
+        UUID uuid = player.getUniqueId();
+        long now = System.currentTimeMillis();
+        if (waterWaveCooldown.containsKey(uuid) && waterWaveCooldown.get(uuid) > now) {
+            long remaining = (waterWaveCooldown.get(uuid) - now) / 1000;
+            player.sendMessage(Component.text("Волна будет доступна через " + remaining + " сек.", NamedTextColor.RED));
+            return;
+        }
+
+        // Находим место взгляда на земле
+        Block targetBlock = player.getTargetBlockExact(30, FluidCollisionMode.NEVER);
+        Location startLoc;
+        if (targetBlock != null) {
+            startLoc = targetBlock.getLocation().add(0.5, 1.0, 0.5);
+        } else {
+            startLoc = player.getLocation();
+        }
+
+        player.getWorld().playSound(startLoc, Sound.ENTITY_PLAYER_SPLASH_HIGH_SPEED, 1.5f, 1.0f);
+        player.getWorld().playSound(startLoc, Sound.ITEM_BUCKET_EMPTY, 1.5f, 1.0f);
+
+        // Направление волны совпадает с горизонтальным направлением взгляда игрока
+        Vector direction = player.getLocation().getDirection().setY(0).normalize();
+        if (direction.lengthSquared() < 0.01) {
+            direction = new Vector(1, 0, 0);
+        }
+
+        // Перпендикулярный вектор для вычисления ширины волны (вправо)
+        Vector right = new Vector(-direction.getZ(), 0, direction.getX()).normalize();
+
+        final Location waveCenter = startLoc.clone();
+        final Set<UUID> hitEntities = new HashSet<>();
+
+        new org.bukkit.scheduler.BukkitRunnable() {
+            int step = 0;
+            final int maxSteps = 12;
+
+            @Override
+            public void run() {
+                if (step >= maxSteps) {
+                    this.cancel();
+                    return;
+                }
+
+                waveCenter.add(direction);
+
+                // Отрисовка волны шириной 5 блоков, высотой 2 блока, длиной 1 блок
+                for (int i = -2; i <= 2; i++) {
+                    for (int h = 0; h < 2; h++) {
+                        Location particleLoc = waveCenter.clone()
+                                .add(right.clone().multiply(i))
+                                .add(0, h, 0);
+
+                        waveCenter.getWorld().spawnParticle(Particle.SPLASH, particleLoc, 3, 0.2, 0.2, 0.2, 0.05);
+                        waveCenter.getWorld().spawnParticle(Particle.WATER_WAKE, particleLoc, 2, 0.1, 0.1, 0.1, 0.02);
+                        waveCenter.getWorld().spawnParticle(Particle.FALLING_WATER, particleLoc, 1, 0.2, 0.2, 0.2, 0.01);
+                    }
+                }
+
+                // Поиск и воздействие на сущности
+                Collection<Entity> nearby = waveCenter.getWorld().getNearbyEntities(waveCenter, 2.5, 1.5, 2.5);
+                for (Entity e : nearby) {
+                    if (e instanceof LivingEntity le && !e.equals(player)) {
+                        UUID targetUuid = le.getUniqueId();
+                        if (!hitEntities.contains(targetUuid)) {
+                            hitEntities.add(targetUuid);
+
+                            // Наносим 2 сердца (4 хп)
+                            le.damage(4.0, player);
+
+                            // Отталкиваем на 7 блоков в направлении волны
+                            Vector pushVec = direction.clone().multiply(1.3).setY(0.35);
+                            le.setVelocity(pushVec);
+
+                            le.getWorld().playSound(le.getLocation(), Sound.ENTITY_GENERIC_SPLASH, 1.0f, 1.0f);
+                        }
+                    }
+                }
+
+                step++;
+            }
+        }.runTaskTimer(this, 0L, 1L);
+
+        // Кулдаун 20 секунд
+        waterWaveCooldown.put(uuid, now + 20000);
     }
 
     // --- КЛАСС ПРОЦЕССА КРЮКА ---
