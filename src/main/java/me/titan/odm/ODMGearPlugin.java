@@ -18,11 +18,13 @@ import org.bukkit.event.block.Action;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.ItemDespawnEvent;
+import org.bukkit.event.entity.ProjectileHitEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryType;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerItemHeldEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.event.player.PlayerInteractEntityEvent;
 import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.EquipmentSlotGroup;
 import org.bukkit.inventory.ItemStack;
@@ -43,11 +45,14 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
     private final NamespacedKey gearKey = new NamespacedKey(this, "odm_gear");
     private final NamespacedKey bladeKey = new NamespacedKey(this, "odm_blade");
     private final NamespacedKey fluidKey = new NamespacedKey(this, "titan_fluid");
-    private final NamespacedKey waterSwordKey = new NamespacedKey(this, "water_sword");
+    private final NamespacedKey villagerStaffKey = new NamespacedKey(this, "villager_staff");
     private final Map<UUID, HookProcess> activeHooks = new ConcurrentHashMap<>();
     private final Set<UUID> fallImmune = Collections.newSetFromMap(new ConcurrentHashMap<>());
     private final Map<UUID, Long> titanAbilitiesCooldown = new HashMap<>();
-    private final Map<UUID, Long> waterWaveCooldown = new HashMap<>();
+    private final Map<UUID, Long> villagerStaffCooldown = new HashMap<>();
+    private final Map<UUID, Long> villagerStrikeCooldown = new HashMap<>();
+    private final Map<UUID, IronGolem> activeGolems = new ConcurrentHashMap<>();
+    private final Map<UUID, ItemDisplay> golemSymbols = new ConcurrentHashMap<>();
     private final Set<UUID> titans = new HashSet<>();
 
     @Override
@@ -56,18 +61,86 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
         getCommand("odm").setExecutor(this);
         getCommand("odm").setTabCompleter(this);
 
-        // Задача для бега по стенам Титанов
+        // Главный планировщик задач для Титанов и притяжения Посоха Жителя
         Bukkit.getScheduler().runTaskTimer(this, () -> {
+            // Бег по стенам Титанов
             for (UUID uuid : titans) {
                 Player p = Bukkit.getPlayer(uuid);
                 if (p == null || !p.isOnline()) continue;
                 
-                // Проверка бега в стену
                 Block front = p.getEyeLocation().add(p.getLocation().getDirection().multiply(0.8)).getBlock();
                 if (front.getType().isSolid()) {
                     Vector vel = p.getVelocity();
                     vel.setY(0.4); // Подъем по стене
                     p.setVelocity(vel);
+                }
+            }
+
+            // Логика притяжения к Голему для Посоха Жителя
+            for (Map.Entry<UUID, IronGolem> entry : activeGolems.entrySet()) {
+                UUID playerUuid = entry.getKey();
+                IronGolem golem = entry.getValue();
+                Player p = Bukkit.getPlayer(playerUuid);
+                
+                if (p == null || !p.isOnline()) {
+                    golem.remove();
+                    ItemDisplay symbol = golemSymbols.remove(playerUuid);
+                    if (symbol != null) symbol.remove();
+                    activeGolems.remove(playerUuid);
+                    continue;
+                }
+
+                if (!golem.isValid() || golem.isDead()) {
+                    ItemDisplay symbol = golemSymbols.remove(playerUuid);
+                    if (symbol != null) symbol.remove();
+                    activeGolems.remove(playerUuid);
+                    p.sendMessage(Component.text("Ваш Железный Голем развалился!", NamedTextColor.RED));
+                    continue;
+                }
+
+                // Обновление парящего и вращающегося символа над головой голема
+                ItemDisplay symbol = golemSymbols.get(playerUuid);
+                if (symbol != null && symbol.isValid()) {
+                    Location symLoc = golem.getEyeLocation().add(0, 1.4, 0);
+                    // Плавно вращаем символ по времени
+                    float yaw = (float) ((System.currentTimeMillis() / 10) % 360);
+                    symLoc.setYaw(yaw);
+                    symbol.teleport(symLoc);
+                }
+
+                // Если игрок держит Посох Жителя, плавно тянем его к голему
+                ItemStack inHand = p.getInventory().getItemInMainHand();
+                if (isVillagerStaff(inHand)) {
+                    // Восстанавливаем поводок при необходимости
+                    if (golem.getLeashHolder() == null || !golem.getLeashHolder().equals(p)) {
+                        golem.setLeashHolder(p);
+                    }
+
+                    Location pLoc = p.getLocation();
+                    Location gLoc = golem.getLocation();
+                    double dist = pLoc.distance(gLoc);
+
+                    if (dist > 2.0) {
+                        Vector toGolem = gLoc.toVector().subtract(pLoc.toVector());
+                        // Постоянная комфортная скорость притяжения (зависит от расстояния)
+                        double pullSpeed = 1.35;
+                        if (dist > 15.0) {
+                            pullSpeed = 1.6;
+                        }
+                        Vector vel = toGolem.normalize().multiply(pullSpeed);
+
+                        // Поведение при шифте или обычном полете
+                        if (p.isSneaking()) {
+                            vel.multiply(1.15); // Быстрая подтяжка на шифте
+                        } else {
+                            // Легкая компенсация силы тяжести, создающая "парящий" эффект Леща
+                            vel.setY(vel.getY() * 0.82 + 0.16);
+                        }
+                        p.setVelocity(vel);
+
+                        // Эффекты зелёных магических искр
+                        p.getWorld().spawnParticle(Particle.HAPPY_VILLAGER, pLoc.clone().add(0, 1, 0), 2, 0.1, 0.1, 0.1, 0.02);
+                    }
                 }
             }
         }, 0, 1);
@@ -96,9 +169,9 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
                 player.getInventory().addItem(createSerum());
                 player.sendMessage(Component.text("Вы получили сыворотку Атакующего Титана!", NamedTextColor.RED));
                 return true;
-            } else if (args[0].equalsIgnoreCase("water_sword")) {
-                player.getInventory().addItem(createWaterSword());
-                player.sendMessage(Component.text("Вы получили Водяной Меч!", NamedTextColor.BLUE));
+            } else if (args[0].equalsIgnoreCase("villager_staff")) {
+                player.getInventory().addItem(createVillagerStaff());
+                player.sendMessage(Component.text("Вы получили Посох Жителя!", NamedTextColor.GOLD));
                 return true;
             }
         }
@@ -112,7 +185,7 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
     @Override
     public List<String> onTabComplete(@NotNull CommandSender sender, @NotNull Command command, @NotNull String alias, @NotNull String[] args) {
         if (args.length == 1) {
-            List<String> list = new ArrayList<>(Arrays.asList("serum", "water_sword"));
+            List<String> list = new ArrayList<>(Arrays.asList("serum", "villager_staff"));
             list.removeIf(s -> !s.toLowerCase().startsWith(args[0].toLowerCase()));
             return list;
         }
@@ -142,17 +215,17 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
         return item;
     }
 
-    private ItemStack createWaterSword() {
-        ItemStack item = new ItemStack(Material.DIAMOND_SWORD);
+    private ItemStack createVillagerStaff() {
+        ItemStack item = new ItemStack(Material.IRON_SWORD);
         ItemMeta meta = item.getItemMeta();
-        meta.displayName(Component.text("Водяной Меч", NamedTextColor.BLUE).decoration(TextDecoration.BOLD, true).decoration(TextDecoration.ITALIC, false));
-        // Для ресурспака: 500 - модель водяного меча
-        meta.setCustomModelData(500);
+        meta.displayName(Component.text("Посох Жителя", NamedTextColor.GOLD).decoration(TextDecoration.BOLD, true).decoration(TextDecoration.ITALIC, false));
+        // Для ресурспака: 998 - модель посоха жителя
+        meta.setCustomModelData(998);
         meta.setUnbreakable(true);
-        meta.getPersistentDataContainer().set(waterSwordKey, PersistentDataType.BYTE, (byte) 1);
+        meta.getPersistentDataContainer().set(villagerStaffKey, PersistentDataType.BYTE, (byte) 1);
 
-        // Урон 14 (базовый урон меча заменяется этим модификатором на 14.0)
-        AttributeModifier modifier = new AttributeModifier(new NamespacedKey(this, "water_sword_damage"), 14.0, AttributeModifier.Operation.ADD_NUMBER, EquipmentSlotGroup.MAINHAND);
+        // Урон при атаке 6.0
+        AttributeModifier modifier = new AttributeModifier(new NamespacedKey(this, "villager_staff_damage"), 6.0, AttributeModifier.Operation.ADD_NUMBER, EquipmentSlotGroup.MAINHAND);
         meta.addAttributeModifier(Attribute.ATTACK_DAMAGE, modifier);
 
         item.setItemMeta(meta);
@@ -225,10 +298,17 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
             return;
         }
 
-        // Использование Водяного Меча
-        if (isWaterSword(item) && (event.getAction() == Action.RIGHT_CLICK_AIR || event.getAction() == Action.RIGHT_CLICK_BLOCK)) {
+        // Использование Посоха Жителя (Колдовской взрыв на ЛКМ)
+        if (isVillagerStaff(item) && (event.getAction() == Action.LEFT_CLICK_AIR || event.getAction() == Action.LEFT_CLICK_BLOCK)) {
             event.setCancelled(true);
-            useWaterSwordAbility(player);
+            useVillagerStaffLeftClickAbility(player);
+            return;
+        }
+
+        // Использование Посоха Жителя (Призыв Голема на ПКМ)
+        if (isVillagerStaff(item) && (event.getAction() == Action.RIGHT_CLICK_AIR || event.getAction() == Action.RIGHT_CLICK_BLOCK)) {
+            event.setCancelled(true);
+            useVillagerStaffAbility(player);
             return;
         }
 
@@ -263,8 +343,36 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
 
     @EventHandler
     public void onQuit(PlayerQuitEvent event) {
-        HookProcess p = activeHooks.remove(event.getPlayer().getUniqueId());
+        UUID uuid = event.getPlayer().getUniqueId();
+        HookProcess p = activeHooks.remove(uuid);
         if (p != null) p.cancel();
+
+        IronGolem golem = activeGolems.remove(uuid);
+        if (golem != null) golem.remove();
+        ItemDisplay symbol = golemSymbols.remove(uuid);
+        if (symbol != null) symbol.remove();
+    }
+
+    @EventHandler
+    public void onPlayerDeath(org.bukkit.event.entity.PlayerDeathEvent event) {
+        UUID uuid = event.getEntity().getUniqueId();
+        IronGolem golem = activeGolems.remove(uuid);
+        if (golem != null) golem.remove();
+        ItemDisplay symbol = golemSymbols.remove(uuid);
+        if (symbol != null) symbol.remove();
+    }
+
+    @EventHandler
+    public void onPlayerInteractEntity(PlayerInteractEntityEvent event) {
+        if (event.getHand() == EquipmentSlot.OFF_HAND) return;
+        Player player = event.getPlayer();
+        ItemStack item = player.getInventory().getItemInMainHand();
+        if (isVillagerStaff(item)) {
+            if (event.getRightClicked() instanceof Villager villager) {
+                event.setCancelled(true);
+                transformVillagerToEmeralds(player, villager);
+            }
+        }
     }
 
     private boolean isBlade(ItemStack item) {
@@ -380,7 +488,7 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
         if (event.getEntityType() == EntityType.ITEM) {
             Item itemEntity = (Item) event.getEntity();
             ItemStack stack = itemEntity.getItemStack();
-            if (isBlade(stack) || isGear(stack) || isWaterSword(stack)) {
+            if (isBlade(stack) || isGear(stack) || isVillagerStaff(stack)) {
                 event.setCancelled(true);
             }
         }
@@ -389,40 +497,35 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
     @EventHandler
     public void onItemDespawn(ItemDespawnEvent event) {
         ItemStack stack = event.getEntity().getItemStack();
-        if (isBlade(stack) || isGear(stack) || isWaterSword(stack)) {
+        if (isBlade(stack) || isGear(stack) || isVillagerStaff(stack)) {
             event.setCancelled(true);
         }
     }
 
     @EventHandler
     public void onEntityDamageByEntity(EntityDamageByEntityEvent event) {
-        if (!(event.getDamager() instanceof Player damager)) return;
         if (!(event.getEntity() instanceof LivingEntity victim)) return;
 
-        ItemStack inHand = damager.getInventory().getItemInMainHand();
-        if (isWaterSword(inHand)) {
-            // Шанс 5% подкинуть в воздух на 4 блока
-            if (Math.random() < 0.05) {
-                // Скорость Y ≈ 0.95 подкидывает сущность примерно на 4 блока вверх
-                victim.setVelocity(new Vector(0, 0.95, 0));
-
-                World world = victim.getWorld();
-                Location loc = victim.getLocation();
-                world.playSound(loc, Sound.ENTITY_PLAYER_SPLASH, 1.5f, 0.8f);
-                world.playSound(loc, Sound.ITEM_BUCKET_EMPTY, 1.2f, 1.2f);
-
-                // Эффекты водяного сплеша / гейзера
-                for (int i = 0; i < 25; i++) {
-                    double offsetX = (Math.random() - 0.5) * 0.8;
-                    double offsetY = Math.random() * 2.0;
-                    double offsetZ = (Math.random() - 0.5) * 0.8;
-                    world.spawnParticle(Particle.SPLASH, loc.clone().add(offsetX, offsetY, offsetZ), 1, 0, 0, 0, 0.1);
-                    world.spawnParticle(Particle.WATER_WAKE, loc.clone().add(offsetX, offsetY, offsetZ), 1, 0, 0, 0, 0.05);
+        // Отмена урона между призвателем и его големом
+        if (event.getDamager() instanceof Player playerDamager && victim instanceof IronGolem golemVictim) {
+            if (golemVictim.getPersistentDataContainer().has(new NamespacedKey(this, "owner_golem"), PersistentDataType.STRING)) {
+                String ownerStr = golemVictim.getPersistentDataContainer().get(new NamespacedKey(this, "owner_golem"), PersistentDataType.STRING);
+                if (playerDamager.getUniqueId().toString().equals(ownerStr)) {
+                    event.setCancelled(true);
+                    return;
                 }
-
-                damager.sendMessage(Component.text("Водный гейзер подкинул противника!", NamedTextColor.AQUA, TextDecoration.BOLD));
             }
         }
+        if (event.getDamager() instanceof IronGolem golemDamager && victim instanceof Player playerVictim) {
+            if (golemDamager.getPersistentDataContainer().has(new NamespacedKey(this, "owner_golem"), PersistentDataType.STRING)) {
+                String ownerStr = golemDamager.getPersistentDataContainer().get(new NamespacedKey(this, "owner_golem"), PersistentDataType.STRING);
+                if (playerVictim.getUniqueId().toString().equals(ownerStr)) {
+                    event.setCancelled(true);
+                    return;
+                }
+            }
+        }
+
     }
 
     private boolean isGear(ItemStack item) {
@@ -435,96 +538,218 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
         return item.getItemMeta().getPersistentDataContainer().has(fluidKey, PersistentDataType.BYTE);
     }
 
-    private boolean isWaterSword(ItemStack item) {
+    private boolean isVillagerStaff(ItemStack item) {
         if (item == null || !item.hasItemMeta()) return false;
-        return item.getItemMeta().getPersistentDataContainer().has(waterSwordKey, PersistentDataType.BYTE);
+        return item.getItemMeta().getPersistentDataContainer().has(villagerStaffKey, PersistentDataType.BYTE);
     }
 
-    private void useWaterSwordAbility(Player player) {
+    private void useVillagerStaffAbility(Player player) {
+        // Ищем жителя в направлении взгляда игрока (дистанция до 15 блоков)
+        Villager targetVillager = null;
+        double maxDist = 15.0;
+        Location eye = player.getEyeLocation();
+        Vector dir = eye.getDirection().normalize();
+
+        for (double d = 0; d < maxDist; d += 0.5) {
+            Location point = eye.clone().add(dir.clone().multiply(d));
+            Collection<Entity> entities = point.getWorld().getNearbyEntities(point, 1.2, 1.2, 1.2);
+            for (Entity e : entities) {
+                if (e instanceof Villager villager && !villager.isDead()) {
+                    targetVillager = villager;
+                    break;
+                }
+            }
+            if (targetVillager != null) break;
+        }
+
+        if (targetVillager != null) {
+            transformVillagerToEmeralds(player, targetVillager);
+        } else {
+            player.sendMessage(Component.text("Для магии превращения нужно смотреть на Жителя!", NamedTextColor.RED));
+        }
+    }
+
+    private void transformVillagerToEmeralds(Player player, Villager villager) {
+        if (villager == null || villager.isDead()) return;
+        Location loc = villager.getLocation();
+        World world = villager.getWorld();
+
+        // Проигрываем звуки превращения
+        world.playSound(loc, Sound.ENTITY_VILLAGER_HURT, 1.2f, 0.7f);
+        world.playSound(loc, Sound.ENTITY_VILLAGER_YES, 1.5f, 1.0f);
+        world.playSound(loc, Sound.ENTITY_ILLUSIONER_CAST_SPELL, 1.5f, 1.2f);
+        world.playSound(loc, Sound.ENTITY_ITEM_PICKUP, 1.5f, 0.9f);
+
+        // Зеленые частицы счастливого жителя и компостера
+        for (int i = 0; i < 35; i++) {
+            double rx = (Math.random() - 0.5) * 1.5;
+            double ry = Math.random() * 2.0;
+            double rz = (Math.random() - 0.5) * 1.5;
+            world.spawnParticle(Particle.HAPPY_VILLAGER, loc.clone().add(rx, ry, rz), 3, 0.1, 0.1, 0.1, 0.05);
+            world.spawnParticle(Particle.COMPOSTER, loc.clone().add(rx, ry, rz), 2, 0.1, 0.1, 0.1, 0.02);
+        }
+
+        // Спавним изумруды на месте жителя (от 3 до 7 штук)
+        int emeraldCount = (int) (Math.random() * 5) + 3;
+        world.dropItemNaturally(loc.add(0, 0.5, 0), new ItemStack(Material.EMERALD, emeraldCount));
+
+        // Удаляем жителя из мира
+        villager.remove();
+
+        player.sendMessage(Component.text("Житель успешно обращён в " + emeraldCount + " изумрудов!", NamedTextColor.DARK_GREEN, TextDecoration.BOLD));
+    }
+
+    private void useVillagerStaffLeftClickAbility(Player player) {
         UUID uuid = player.getUniqueId();
         long now = System.currentTimeMillis();
-        if (waterWaveCooldown.containsKey(uuid) && waterWaveCooldown.get(uuid) > now) {
-            long remaining = (waterWaveCooldown.get(uuid) - now) / 1000;
-            player.sendMessage(Component.text("Волна будет доступна через " + remaining + " сек.", NamedTextColor.RED));
+
+        // Кулдаун 2 минуты (120000 мс)
+        if (villagerStrikeCooldown.containsKey(uuid) && villagerStrikeCooldown.get(uuid) > now) {
+            long remainingMs = villagerStrikeCooldown.get(uuid) - now;
+            long mins = remainingMs / 60000;
+            long secs = (remainingMs % 60000) / 1000;
+            String timeStr = mins > 0 ? mins + " мин. " + secs + " сек." : secs + " сек.";
+            player.sendMessage(Component.text("Взрыв Посоха Жителя на перезарядке! Осталось " + timeStr, NamedTextColor.RED));
             return;
         }
 
-        // Находим место взгляда на земле
-        Block targetBlock = player.getTargetBlockExact(30, FluidCollisionMode.NEVER);
-        Location startLoc;
-        if (targetBlock != null) {
-            startLoc = targetBlock.getLocation().add(0.5, 1.0, 0.5);
-        } else {
-            startLoc = player.getLocation();
+        // Находим место взгляда
+        Block targetBlock = player.getTargetBlockExact(40, FluidCollisionMode.NEVER);
+        if (targetBlock == null || targetBlock.getType().isAir()) {
+            targetBlock = player.getEyeLocation().add(player.getLocation().getDirection().multiply(15)).getBlock();
         }
 
-        player.getWorld().playSound(startLoc, Sound.ENTITY_PLAYER_SPLASH_HIGH_SPEED, 1.5f, 1.0f);
-        player.getWorld().playSound(startLoc, Sound.ITEM_BUCKET_EMPTY, 1.5f, 1.0f);
+        final Block finalTargetBlock = targetBlock;
+        final Location targetLoc = finalTargetBlock.getLocation().add(0.5, 0.5, 0.5);
+        final World world = targetLoc.getWorld();
+        if (world == null) return;
 
-        // Направление волны совпадает с горизонтальным направлением взгляда игрока
-        Vector direction = player.getLocation().getDirection().setY(0).normalize();
-        if (direction.lengthSquared() < 0.01) {
-            direction = new Vector(1, 0, 0);
-        }
+        // Кулдаун 2 минуты
+        villagerStrikeCooldown.put(uuid, now + 120000);
 
-        // Перпендикулярный вектор для вычисления ширины волны (вправо)
-        Vector right = new Vector(-direction.getZ(), 0, direction.getX()).normalize();
-
-        final Location waveCenter = startLoc.clone();
-        final Set<UUID> hitEntities = new HashSet<>();
+        // Воспроизводим начальные звуки накопления заряда
+        world.playSound(targetLoc, Sound.BLOCK_BEACON_ACTIVATE, 1.5f, 1.1f);
+        world.playSound(player.getLocation(), Sound.ENTITY_ILLUSIONER_PREPARE_BLINDNESS, 1.2f, 1.0f);
 
         new org.bukkit.scheduler.BukkitRunnable() {
-            int step = 0;
-            final int maxSteps = 12;
+            int tick = 0;
+            final int maxTicks = 25; // Время заряда около 1.25 сек
 
             @Override
             public void run() {
-                if (step >= maxSteps) {
+                if (!player.isOnline()) {
                     this.cancel();
                     return;
                 }
 
-                waveCenter.add(direction);
-
-                // Отрисовка волны шириной 5 блоков, высотой 2 блока, длиной 1 блок
-                for (int i = -2; i <= 2; i++) {
-                    for (int h = 0; h < 2; h++) {
-                        Location particleLoc = waveCenter.clone()
-                                .add(right.clone().multiply(i))
-                                .add(0, h, 0);
-
-                        waveCenter.getWorld().spawnParticle(Particle.SPLASH, particleLoc, 3, 0.2, 0.2, 0.2, 0.05);
-                        waveCenter.getWorld().spawnParticle(Particle.WATER_WAKE, particleLoc, 2, 0.1, 0.1, 0.1, 0.02);
-                        waveCenter.getWorld().spawnParticle(Particle.FALLING_WATER, particleLoc, 1, 0.2, 0.2, 0.2, 0.01);
-                    }
+                // Каждые 3 тика проигрываем звук заряда с увеличением тональности
+                if (tick % 3 == 0) {
+                    float pitch = 0.6f + ((float) tick / maxTicks) * 1.4f;
+                    world.playSound(targetLoc, Sound.BLOCK_NOTE_BLOCK_BIT, 0.9f, pitch);
+                    world.playSound(targetLoc, Sound.BLOCK_NOTE_BLOCK_PLING, 0.8f, pitch);
                 }
 
-                // Поиск и воздействие на сущности
-                Collection<Entity> nearby = waveCenter.getWorld().getNearbyEntities(waveCenter, 2.5, 1.5, 2.5);
-                for (Entity e : nearby) {
-                    if (e instanceof LivingEntity le && !e.equals(player)) {
-                        UUID targetUuid = le.getUniqueId();
-                        if (!hitEntities.contains(targetUuid)) {
-                            hitEntities.add(targetUuid);
+                // Визуализация красивого 3D плюсика из синих линий с румбическими стрелками по концам
+                Particle.DustOptions blueDust = new Particle.DustOptions(Color.fromRGB(0, 160, 255), 1.6f);
+                draw3DPlus(world, targetLoc, blueDust);
 
-                            // Наносим 2 сердца (4 хп)
-                            le.damage(4.0, player);
+                if (tick >= maxTicks) {
+                    this.cancel();
 
-                            // Отталкиваем на 7 блоков в направлении волны
-                            Vector pushVec = direction.clone().multiply(1.3).setY(0.35);
-                            le.setVelocity(pushVec);
+                    // Взрыв мощности 3.8f (аккуратный кратер на песке как на 2-м фото)
+                    world.createExplosion(targetLoc, 3.8f, false, true, player);
 
-                            le.getWorld().playSound(le.getLocation(), Sound.ENTITY_GENERIC_SPLASH, 1.0f, 1.0f);
-                        }
+                    // Дополнительный сокрушительный звук взрыва
+                    world.playSound(targetLoc, Sound.ENTITY_GENERIC_EXPLODE, 2.5f, 0.7f);
+                    world.playSound(targetLoc, Sound.ENTITY_LIGHTNING_BOLT_THUNDER, 1.8f, 0.8f);
+
+                    // Огненные и дымовые спецэффекты
+                    for (int i = 0; i < 35; i++) {
+                        world.spawnParticle(Particle.FLAME, targetLoc, 8, 1.8, 1.8, 1.8, 0.2);
+                        world.spawnParticle(Particle.EXPLOSION_EMITTER, targetLoc, 2, 2.5, 2.5, 2.5, 0.3);
+                        world.spawnParticle(Particle.CLOUD, targetLoc, 6, 2.2, 2.2, 2.2, 0.15);
                     }
+
+                    // Волна дыма, расходящаяся диском
+                    for (double theta = 0; theta < Math.PI * 2; theta += Math.PI / 12) {
+                        double x = Math.cos(theta) * 4.5;
+                        double z = Math.sin(theta) * 4.5;
+                        world.spawnParticle(Particle.CLOUD, targetLoc.clone().add(x, 0.1, z), 4, 0.2, 0.1, 0.2, 0.02);
+                        world.spawnParticle(Particle.SMOKE, targetLoc.clone().add(x * 1.1, 0.3, z * 1.1), 3, 0.2, 0.2, 0.2, 0.02);
+                    }
+
+
                 }
 
-                step++;
+                tick++;
             }
-        }.runTaskTimer(this, 0L, 1L);
+        }.runTaskTimer(ODMGearPlugin.this, 0L, 1L);
+    }
 
-        // Кулдаун 20 секунд
-        waterWaveCooldown.put(uuid, now + 20000);
+    private void draw3DPlus(World world, Location loc, Particle.DustOptions dust) {
+        double cx = loc.getX();
+        double cy = loc.getY();
+        double cz = loc.getZ();
+        double len = 1.8;
+        double step = 0.15;
+
+        // Линия по оси X
+        for (double x = -len; x <= len; x += step) {
+            world.spawnParticle(Particle.DUST, new Location(world, cx + x, cy, cz), 1, dust);
+        }
+        // Линия по оси Y
+        for (double y = -len; y <= len; y += step) {
+            world.spawnParticle(Particle.DUST, new Location(world, cx, cy + y, cz), 1, dust);
+        }
+        // Линия по оси Z
+        for (double z = -len; z <= len; z += step) {
+            world.spawnParticle(Particle.DUST, new Location(world, cx, cy, cz + z), 1, dust);
+        }
+
+        // Рисование наконечников-стрелок (шевронов) на концах осей
+        double arrowLen = 0.32;
+        
+        // +X наконечник
+        drawArrowSegment(world, cx + len, cy, cz, -arrowLen, arrowLen, 0, dust);
+        drawArrowSegment(world, cx + len, cy, cz, -arrowLen, -arrowLen, 0, dust);
+        drawArrowSegment(world, cx + len, cy, cz, -arrowLen, 0, arrowLen, dust);
+        drawArrowSegment(world, cx + len, cy, cz, -arrowLen, 0, -arrowLen, dust);
+
+        // -X наконечник
+        drawArrowSegment(world, cx - len, cy, cz, arrowLen, arrowLen, 0, dust);
+        drawArrowSegment(world, cx - len, cy, cz, arrowLen, -arrowLen, 0, dust);
+        drawArrowSegment(world, cx - len, cy, cz, arrowLen, 0, arrowLen, dust);
+        drawArrowSegment(world, cx - len, cy, cz, arrowLen, 0, -arrowLen, dust);
+
+        // +Y наконечник
+        drawArrowSegment(world, cx, cy + len, cz, arrowLen, -arrowLen, 0, dust);
+        drawArrowSegment(world, cx, cy + len, cz, -arrowLen, -arrowLen, 0, dust);
+        drawArrowSegment(world, cx, cy + len, cz, 0, -arrowLen, arrowLen, dust);
+        drawArrowSegment(world, cx, cy + len, cz, 0, -arrowLen, -arrowLen, dust);
+
+        // -Y наконечник
+        drawArrowSegment(world, cx, cy - len, cz, arrowLen, arrowLen, 0, dust);
+        drawArrowSegment(world, cx, cy - len, cz, -arrowLen, arrowLen, 0, dust);
+        drawArrowSegment(world, cx, cy - len, cz, 0, arrowLen, arrowLen, dust);
+        drawArrowSegment(world, cx, cy - len, cz, 0, arrowLen, -arrowLen, dust);
+
+        // +Z наконечник
+        drawArrowSegment(world, cx, cy, cz + len, arrowLen, 0, -arrowLen, dust);
+        drawArrowSegment(world, cx, cy, cz + len, -arrowLen, 0, -arrowLen, dust);
+        drawArrowSegment(world, cx, cy, cz + len, 0, arrowLen, -arrowLen, dust);
+        drawArrowSegment(world, cx, cy, cz + len, 0, -arrowLen, -arrowLen, dust);
+
+        // -Z наконечник
+        drawArrowSegment(world, cx, cy, cz - len, arrowLen, 0, arrowLen, dust);
+        drawArrowSegment(world, cx, cy, cz - len, -arrowLen, 0, arrowLen, dust);
+        drawArrowSegment(world, cx, cy, cz - len, 0, arrowLen, arrowLen, dust);
+        drawArrowSegment(world, cx, cy, cz - len, 0, -arrowLen, arrowLen, dust);
+    }
+
+    private void drawArrowSegment(World world, double x, double y, double z, double dx, double dy, double dz, Particle.DustOptions dust) {
+        for (double t = 0; t <= 1.0; t += 0.25) {
+            world.spawnParticle(Particle.DUST, new Location(world, x + dx * t, y + dy * t, z + dz * t), 1, dust);
+        }
     }
 
     // --- КЛАСС ПРОЦЕССА КРЮКА ---
