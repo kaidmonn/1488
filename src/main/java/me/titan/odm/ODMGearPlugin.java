@@ -626,7 +626,6 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
                     
                     // Sonic sound effects
                     attacker.getWorld().playSound(attacker.getLocation(), Sound.ENTITY_LIGHTNING_BOLT_THUNDER, 1.5f, 1.2f);
-                    attacker.getWorld().playSound(attacker.getLocation(), Sound.ITEM_WIND_CHARGE_USE, 1.5f, 1.0f);
                     
                     // Add temporary fall immunity to owner/attacker for 5 seconds
                     UUID uuid = attacker.getUniqueId();
