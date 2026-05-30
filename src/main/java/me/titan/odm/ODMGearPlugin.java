@@ -46,6 +46,8 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
     private final NamespacedKey bladeKey = new NamespacedKey(this, "odm_blade");
     private final NamespacedKey fluidKey = new NamespacedKey(this, "titan_fluid");
     private final NamespacedKey villagerStaffKey = new NamespacedKey(this, "villager_staff");
+    private final NamespacedKey thunderMaceKey = new NamespacedKey(this, "thunder_mace");
+    private final Map<UUID, Map<UUID, Double>> damageTrack = new ConcurrentHashMap<>();
     private final Map<UUID, HookProcess> activeHooks = new ConcurrentHashMap<>();
     private final Set<UUID> fallImmune = Collections.newSetFromMap(new ConcurrentHashMap<>());
     private final Map<UUID, Long> titanAbilitiesCooldown = new HashMap<>();
@@ -173,6 +175,10 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
                 player.getInventory().addItem(createVillagerStaff());
                 player.sendMessage(Component.text("Вы получили Посох Жителя!", NamedTextColor.GOLD));
                 return true;
+            } else if (args[0].equalsIgnoreCase("mace") || args[0].equalsIgnoreCase("thunder_mace")) {
+                player.getInventory().addItem(createThunderMace());
+                player.sendMessage(Component.text("Вы получили Гром-булаву!", NamedTextColor.YELLOW, TextDecoration.BOLD));
+                return true;
             }
         }
 
@@ -185,7 +191,7 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
     @Override
     public List<String> onTabComplete(@NotNull CommandSender sender, @NotNull Command command, @NotNull String alias, @NotNull String[] args) {
         if (args.length == 1) {
-            List<String> list = new ArrayList<>(Arrays.asList("serum", "villager_staff"));
+            List<String> list = new ArrayList<>(Arrays.asList("serum", "villager_staff", "thunder_mace"));
             list.removeIf(s -> !s.toLowerCase().startsWith(args[0].toLowerCase()));
             return list;
         }
@@ -227,6 +233,41 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
         // Урон при атаке 6.0
         AttributeModifier modifier = new AttributeModifier(new NamespacedKey(this, "villager_staff_damage"), 6.0, AttributeModifier.Operation.ADD_NUMBER, EquipmentSlotGroup.MAINHAND);
         meta.addAttributeModifier(Attribute.ATTACK_DAMAGE, modifier);
+
+        item.setItemMeta(meta);
+        return item;
+    }
+
+    private ItemStack createThunderMace() {
+        ItemStack item;
+        try {
+            item = new ItemStack(Material.valueOf("MACE"));
+        } catch (Throwable t) {
+            item = new ItemStack(Material.NETHERITE_SWORD);
+        }
+        ItemMeta meta = item.getItemMeta();
+        meta.displayName(Component.text("Гром-булава", NamedTextColor.YELLOW, TextDecoration.BOLD).decoration(TextDecoration.ITALIC, false));
+        meta.setUnbreakable(true);
+        meta.setCustomModelData(1588);
+        meta.getPersistentDataContainer().set(thunderMaceKey, PersistentDataType.BYTE, (byte) 1);
+
+        List<Component> lore = new ArrayList<>();
+        lore.add(Component.text("Легендарное оружие, повелевающее громом.", NamedTextColor.GRAY).decoration(TextDecoration.ITALIC, false));
+        lore.add(Component.empty());
+        lore.add(Component.text("Способности:", NamedTextColor.GOLD).decoration(TextDecoration.ITALIC, false));
+        lore.add(Component.text("⚡ Удар с высоты (3+ блоков):", NamedTextColor.YELLOW).decoration(TextDecoration.ITALIC, false));
+        lore.add(Component.text(" - Подбрасывает цель на 5 блоков и бьет молнией.", NamedTextColor.GRAY).decoration(TextDecoration.ITALIC, false));
+        lore.add(Component.text(" - Вас подбрасывает на 10 блоков для повторного удара.", NamedTextColor.GRAY).decoration(TextDecoration.ITALIC, false));
+        lore.add(Component.text(" - При убийстве игрока вызывается Мега-молния и взрыв,", NamedTextColor.GRAY).decoration(TextDecoration.ITALIC, false));
+        lore.add(Component.text("   отбрасывающий всех других игроков от лута.", NamedTextColor.GRAY).decoration(TextDecoration.ITALIC, false));
+        lore.add(Component.empty());
+        lore.add(Component.text("⚡ Грозовой Наследник (при смерти):", NamedTextColor.YELLOW).decoration(TextDecoration.ITALIC, false));
+        lore.add(Component.text(" - Уносится на туче к игроку с наименьшим уроном вам.", NamedTextColor.GRAY).decoration(TextDecoration.ITALIC, false));
+        lore.add(Component.text(" - Наносит 2 сердца чистого урона молнией каждые 2 сек.", NamedTextColor.GRAY).decoration(TextDecoration.ITALIC, false));
+        meta.lore(lore);
+
+        AttributeModifier maceMod = new AttributeModifier(new NamespacedKey(this, "thunder_mace_damage"), 8.0, AttributeModifier.Operation.ADD_NUMBER, EquipmentSlotGroup.MAINHAND);
+        meta.addAttributeModifier(Attribute.ATTACK_DAMAGE, maceMod);
 
         item.setItemMeta(meta);
         return item;
@@ -355,11 +396,47 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
 
     @EventHandler
     public void onPlayerDeath(org.bukkit.event.entity.PlayerDeathEvent event) {
-        UUID uuid = event.getEntity().getUniqueId();
+        Player victim = event.getEntity();
+        UUID uuid = victim.getUniqueId();
         IronGolem golem = activeGolems.remove(uuid);
         if (golem != null) golem.remove();
         ItemDisplay symbol = golemSymbols.remove(uuid);
         if (symbol != null) symbol.remove();
+
+        // 1. Killer with Thunder Mace triggers Mega Lightning and Level 4 Explosion
+        Player killer = victim.getKiller();
+        if (killer != null) {
+            ItemStack killerHand = killer.getInventory().getItemInMainHand();
+            if (isThunderMace(killerHand)) {
+                triggerMegaLightningAndKnockback(victim.getLocation(), killer);
+            }
+        }
+
+        // 2. Deceased player carrying Thunder Mace -> trigger Cloud Carrying sequence
+        ItemStack maceToFly = null;
+        for (ItemStack drop : event.getDrops()) {
+            if (isThunderMace(drop)) {
+                maceToFly = drop;
+                break;
+            }
+        }
+        if (maceToFly != null) {
+            event.getDrops().remove(maceToFly);
+            startCloudMaceSequence(victim, maceToFly);
+        }
+    }
+
+    @EventHandler
+    public void onEntityDeath(org.bukkit.event.entity.EntityDeathEvent event) {
+        if (event instanceof org.bukkit.event.entity.PlayerDeathEvent) return;
+        LivingEntity victim = event.getEntity();
+        Player killer = victim.getKiller();
+        if (killer != null) {
+            ItemStack killerHand = killer.getInventory().getItemInMainHand();
+            if (isThunderMace(killerHand)) {
+                triggerMegaLightningAndKnockback(victim.getLocation(), killer);
+            }
+        }
     }
 
     @EventHandler
@@ -488,7 +565,7 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
         if (event.getEntityType() == EntityType.ITEM) {
             Item itemEntity = (Item) event.getEntity();
             ItemStack stack = itemEntity.getItemStack();
-            if (isBlade(stack) || isGear(stack) || isVillagerStaff(stack)) {
+            if (isBlade(stack) || isGear(stack) || isVillagerStaff(stack) || isThunderMace(stack)) {
                 event.setCancelled(true);
             }
         }
@@ -497,7 +574,7 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
     @EventHandler
     public void onItemDespawn(ItemDespawnEvent event) {
         ItemStack stack = event.getEntity().getItemStack();
-        if (isBlade(stack) || isGear(stack) || isVillagerStaff(stack)) {
+        if (isBlade(stack) || isGear(stack) || isVillagerStaff(stack) || isThunderMace(stack)) {
             event.setCancelled(true);
         }
     }
@@ -526,6 +603,49 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
             }
         }
 
+        if (event.getDamager() instanceof Player attacker) {
+            ItemStack inHand = attacker.getInventory().getItemInMainHand();
+            
+            // Mace fall smash attack ability
+            if (isThunderMace(inHand)) {
+                // If the smash condition is met: falling from 3+ blocks height
+                if (attacker.getFallDistance() >= 3.0) {
+                    // 1. Victim is knocked up by 5 blocks (Y velocity ~1.0)
+                    Vector victimVel = victim.getVelocity();
+                    victimVel.setY(1.0);
+                    victim.setVelocity(victimVel);
+                    
+                    // Lightning strike on victim
+                    victim.getWorld().strikeLightningEffect(victim.getLocation());
+                    victim.damage(8.0, attacker); // 4 hearts damage from mace strike
+                    
+                    // 2. Owner/Attacker is knocked up by 10 blocks (Y velocity ~1.45)
+                    Vector attackerVel = attacker.getVelocity();
+                    attackerVel.setY(1.45);
+                    attacker.setVelocity(attackerVel);
+                    
+                    // Sonic sound effects
+                    attacker.getWorld().playSound(attacker.getLocation(), Sound.ENTITY_LIGHTNING_BOLT_THUNDER, 1.5f, 1.2f);
+                    attacker.getWorld().playSound(attacker.getLocation(), Sound.ITEM_WIND_CHARGE_USE, 1.5f, 1.0f);
+                    
+                    // Add temporary fall immunity to owner/attacker for 5 seconds
+                    UUID uuid = attacker.getUniqueId();
+                    fallImmune.add(uuid);
+                    Bukkit.getScheduler().runTaskLater(this, () -> fallImmune.remove(uuid), 100L);
+                    
+                    attacker.sendMessage(Component.text("⚡ Громовой Удар! Вы взмыли ввысь!", NamedTextColor.YELLOW, TextDecoration.BOLD));
+                }
+            }
+
+            // Damage tracking for players (Ability 2)
+            if (victim instanceof Player playerVictim) {
+                UUID victimId = playerVictim.getUniqueId();
+                UUID attackerId = attacker.getUniqueId();
+                damageTrack.computeIfAbsent(victimId, k -> new ConcurrentHashMap<>())
+                           .merge(attackerId, event.getFinalDamage(), Double::sum);
+            }
+        }
+
     }
 
     private boolean isGear(ItemStack item) {
@@ -541,6 +661,11 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
     private boolean isVillagerStaff(ItemStack item) {
         if (item == null || !item.hasItemMeta()) return false;
         return item.getItemMeta().getPersistentDataContainer().has(villagerStaffKey, PersistentDataType.BYTE);
+    }
+
+    private boolean isThunderMace(ItemStack item) {
+        if (item == null || !item.hasItemMeta()) return false;
+        return item.getItemMeta().getPersistentDataContainer().has(thunderMaceKey, PersistentDataType.BYTE);
     }
 
     private void useVillagerStaffAbility(Player player) {
@@ -750,6 +875,225 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
         for (double t = 0; t <= 1.0; t += 0.25) {
             world.spawnParticle(Particle.DUST, new Location(world, x + dx * t, y + dy * t, z + dz * t), 1, dust);
         }
+    }
+
+    private void triggerMegaLightningAndKnockback(Location deathLoc, Player killer) {
+        World world = deathLoc.getWorld();
+        if (world == null) return;
+
+        // 1. Mega Lightning - 5 visual strikes in a circle
+        for (int i = 0; i < 5; i++) {
+            double angle = (i * 2 * Math.PI) / 5;
+            double rx = Math.cos(angle) * 1.5;
+            double rz = Math.sin(angle) * 1.5;
+            Location strikeLoc = deathLoc.clone().add(rx, 0, rz);
+            world.strikeLightningEffect(strikeLoc);
+        }
+        
+        // Audio experience
+        world.playSound(deathLoc, Sound.ENTITY_LIGHTNING_BOLT_THUNDER, 3.0f, 0.5f);
+        world.playSound(deathLoc, Sound.ENTITY_GENERIC_EXPLODE, 2.5f, 0.6f);
+
+        // 2. Visual explosion level 4 that knocks away other players and leaves items perfectly safe
+        for (int i = 0; i < 40; i++) {
+            world.spawnParticle(Particle.EXPLOSION_EMITTER, deathLoc, 1, 1.5, 1.5, 1.5, 0.2);
+            world.spawnParticle(Particle.CLOUD, deathLoc, 2, 2.0, 2.0, 2.0, 0.1);
+            world.spawnParticle(Particle.LAVA, deathLoc, 1, 1.0, 1.0, 1.0, 0.15);
+        }
+
+        // Circular cloud forcefield
+        for (double theta = 0; theta < Math.PI * 2; theta += Math.PI / 10) {
+            double cx = Math.cos(theta) * 5.0;
+            double cz = Math.sin(theta) * 5.0;
+            world.spawnParticle(Particle.CLOUD, deathLoc.clone().add(cx, 0.2, cz), 4, 0.2, 0.1, 0.2, 0.05);
+        }
+
+        // Apply knockback to everyone in 10 block radius except the killer (owner)
+        double knockbackRadius = 10.0;
+        for (Entity entity : world.getNearbyEntities(deathLoc, knockbackRadius, knockbackRadius, knockbackRadius)) {
+            if (entity instanceof Player player) {
+                if (player.equals(killer)) continue;
+                
+                Vector push = player.getLocation().toVector().subtract(deathLoc.toVector());
+                double dist = push.length();
+                if (dist < 0.1) {
+                    push = new Vector(0, 1.2, 0);
+                } else {
+                    push.normalize().multiply(1.8).setY(0.65);
+                }
+                player.setVelocity(push);
+                player.sendMessage(Component.text("Вас отбросило Мега-молнией Гром-булавы!", NamedTextColor.RED));
+            }
+        }
+    }
+
+    private void startCloudMaceSequence(Player victim, ItemStack mace) {
+        // Reset damage track of this victim
+        damageTrack.remove(victim.getUniqueId());
+
+        Location startLoc = victim.getLocation().add(0, 1.5, 0);
+        World world = startLoc.getWorld();
+        if (world == null) return;
+
+        // Spawn carrier model displaying the mace
+        ItemDisplay carrier = world.spawn(startLoc, ItemDisplay.class, ent -> {
+            ent.setItemStack(mace);
+            ent.setGravity(false);
+            ent.setPersistent(false);
+            Transformation trans = ent.getTransformation();
+            trans.getScale().set(1.2f, 1.2f, 1.2f);
+            ent.setTransformation(trans);
+        });
+
+        // Search for initial target
+        Player initialTarget = findTargetForMace(victim);
+
+        if (initialTarget != null) {
+            victim.sendMessage(Component.text("Ваша Гром-булава взмыла в тучу и летит к " + initialTarget.getName() + "!", NamedTextColor.YELLOW));
+            initialTarget.sendMessage(Component.text("Грозовая туча несёт вам легендарную Гром-булаву от " + victim.getName() + "!", NamedTextColor.GOLD, TextDecoration.BOLD));
+        } else {
+            victim.sendMessage(Component.text("Ваша Гром-булава взмыла в грозовую тучу! Игроков нет, она ждёт 15 секунд...", NamedTextColor.YELLOW));
+        }
+
+        new org.bukkit.scheduler.BukkitRunnable() {
+            private Player target = initialTarget;
+            private final Location currentLoc = startLoc.clone();
+            private int ticks = 0;
+
+            @Override
+            public void run() {
+                if (carrier == null || !carrier.isValid()) {
+                    world.dropItemNaturally(currentLoc, mace);
+                    if (carrier != null) carrier.remove();
+                    this.cancel();
+                    return;
+                }
+
+                // If target is null or target has gone offline, look for any online player
+                if (target == null || !target.isOnline()) {
+                    target = null; // ensure it is null if they went offline
+                    
+                    Player found = null;
+                    for (Player p : Bukkit.getOnlinePlayers()) {
+                        if (p.isOnline() && !p.isDead()) {
+                            found = p;
+                            break;
+                        }
+                    }
+                    if (found != null) {
+                        target = found;
+                        target.sendMessage(Component.text("Грозовая туча обнаружила вас и несёт вам легендарную Гром-булаву!", NamedTextColor.GOLD, TextDecoration.BOLD));
+                    }
+                }
+
+                if (target == null) {
+                    // Check 15-second timeout (15 * 20 = 300 ticks)
+                    if (ticks >= 300) {
+                        world.dropItemNaturally(currentLoc, mace);
+                        carrier.remove();
+                        this.cancel();
+                        return;
+                    }
+                } else {
+                    Location targetLoc = target.getLocation().add(0, 1.2, 0);
+                    double distance = currentLoc.distance(targetLoc);
+
+                    // Check arrival
+                    if (distance < 1.5) {
+                        Location dropLoc = target.getLocation();
+                        if (target.getInventory().firstEmpty() != -1) {
+                            target.getInventory().addItem(mace);
+                            target.sendMessage(Component.text("Вы успешно поймали Гром-булаву из тучи!", NamedTextColor.GREEN, TextDecoration.BOLD));
+                        } else {
+                            world.dropItemNaturally(dropLoc, mace);
+                            target.sendMessage(Component.text("Гром-булава выпала из тучи у ваших ног!", NamedTextColor.YELLOW, TextDecoration.BOLD));
+                        }
+
+                        // Finale lightning strike
+                        world.strikeLightningEffect(dropLoc);
+                        world.playSound(dropLoc, Sound.UI_TOAST_CHALLENGE_COMPLETE, 1.2f, 1.0f);
+
+                        carrier.remove();
+                        this.cancel();
+                        return;
+                    }
+
+                    // Smooth migration towards target
+                    Vector dir = targetLoc.toVector().subtract(currentLoc.toVector()).normalize();
+                    double speed = 0.35;
+                    currentLoc.add(dir.multiply(speed));
+
+                    // Move carrier display
+                    carrier.teleport(currentLoc);
+                }
+
+                // Elegantly rotate cargo
+                float yaw = (ticks * 6) % 360;
+                carrier.setRotation(yaw, 0);
+
+                // Spawning visual storm clouds
+                for (int i = 0; i < 5; i++) {
+                    double rx = (Math.random() - 0.5) * 1.5;
+                    double ry = (Math.random() - 0.5) * 1.0;
+                    double rz = (Math.random() - 0.5) * 1.5;
+                    Location pLoc = currentLoc.clone().add(rx, ry, rz);
+                    world.spawnParticle(Particle.CLOUD, pLoc, 1, 0, 0, 0, 0.02);
+                }
+                if (ticks % 2 == 0) {
+                    double rx = (Math.random() - 0.5) * 1.8;
+                    double ry = (Math.random() - 0.5) * 1.2;
+                    double rz = (Math.random() - 0.5) * 1.8;
+                    world.spawnParticle(Particle.CAMPFIRE_COSY_SMOKE, currentLoc.clone().add(rx, ry, rz), 1, 0, 0, 0, 0.01);
+                }
+
+                // Cloud strikes nearby enemies every 2 seconds (40 ticks)
+                if (ticks % 40 == 0) {
+                    Collection<Entity> targets = world.getNearbyEntities(currentLoc, 7.0, 7.0, 7.0);
+                    boolean struckAny = false;
+                    for (Entity entity : targets) {
+                        if (entity instanceof LivingEntity le) {
+                            if (target != null && le.equals(target)) continue;
+                            
+                            world.strikeLightningEffect(le.getLocation());
+                            // deals true damage of 2 hearts (4 HP)
+                            le.damage(4.0);
+                            le.sendMessage(Component.text("Вас поразила разгневанная грозовая туча!", NamedTextColor.RED));
+                            struckAny = true;
+                        }
+                    }
+                    if (struckAny) {
+                        world.playSound(currentLoc, Sound.ENTITY_LIGHTNING_BOLT_THUNDER, 1.2f, 1.1f);
+                    }
+                }
+
+                ticks++;
+            }
+        }.runTaskTimer(ODMGearPlugin.this, 0L, 1L);
+    }
+
+    private Player findTargetForMace(Player victim) {
+        List<Player> online = new ArrayList<>(Bukkit.getOnlinePlayers());
+        online.remove(victim); // Don't send mace to the deceased player
+        if (online.isEmpty()) return null;
+
+        Map<UUID, Double> victimDamage = damageTrack.getOrDefault(victim.getUniqueId(), Collections.emptyMap());
+        
+        double minDamage = Double.MAX_VALUE;
+        List<Player> minDamagers = new ArrayList<>();
+
+        for (Player p : online) {
+            double damage = victimDamage.getOrDefault(p.getUniqueId(), 0.0);
+            if (damage < minDamage) {
+                minDamage = damage;
+                minDamagers.clear();
+                minDamagers.add(p);
+            } else if (damage == minDamage) {
+                minDamagers.add(p);
+            }
+        }
+
+        if (minDamagers.isEmpty()) return null;
+        return minDamagers.get((int) (Math.random() * minDamagers.size()));
     }
 
     // --- КЛАСС ПРОЦЕССА КРЮКА ---
