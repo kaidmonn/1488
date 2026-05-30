@@ -610,22 +610,24 @@ public class ODMGearPlugin extends JavaPlugin implements Listener, CommandExecut
             if (isThunderMace(inHand)) {
                 // If the smash condition is met: falling from 3+ blocks height
                 if (attacker.getFallDistance() >= 3.0) {
+                    // Reset fall distance to prevent recursion
+                    attacker.setFallDistance(0.0f);
+
                     // 1. Victim is knocked up by 5 blocks (Y velocity ~1.0)
                     Vector victimVel = victim.getVelocity();
                     victimVel.setY(1.0);
                     victim.setVelocity(victimVel);
                     
-                    // Lightning strike on victim
-                    victim.getWorld().strikeLightningEffect(victim.getLocation());
-                    victim.damage(8.0, attacker); // 4 hearts damage from mace strike
+                    // Add extra damage safely in the event
+                    event.setDamage(event.getDamage() + 8.0);
                     
                     // 2. Owner/Attacker is knocked up by 10 blocks (Y velocity ~1.45)
                     Vector attackerVel = attacker.getVelocity();
                     attackerVel.setY(1.45);
                     attacker.setVelocity(attackerVel);
                     
-                    // Sonic sound effects
-                    attacker.getWorld().playSound(attacker.getLocation(), Sound.ENTITY_LIGHTNING_BOLT_THUNDER, 1.5f, 1.2f);
+                    // Sonic sound effects (no physical lightning strike to avoid infinite loops and lag)
+                    victim.getWorld().playSound(victim.getLocation(), Sound.ENTITY_LIGHTNING_BOLT_THUNDER, 1.5f, 1.2f);
                     
                     // Add temporary fall immunity to owner/attacker for 5 seconds
                     UUID uuid = attacker.getUniqueId();
